@@ -5,7 +5,11 @@ It implements the Reader specification, but your plugin may choose to
 implement multiple readers or even other plugin contributions. see:
 https://napari.org/stable/plugins/guides.html?#readers
 """
+import cv2
 import numpy as np
+import requests
+from pynwb import NWBHDF5IO
+from pynwb.image import ImageSeries
 
 
 def napari_get_reader(path):
@@ -29,7 +33,7 @@ def napari_get_reader(path):
         path = path[0]
 
     # if we know we cannot read the file, we immediately return None.
-    if not path.endswith(".npy"):
+    if not path.endswith(".nwb"):
         return None
 
     # otherwise we return the *function* that can read ``path``.
@@ -58,15 +62,39 @@ def reader_function(path):
         layer. Both "meta", and "layer_type" are optional. napari will
         default to layer_type=="image" if not provided
     """
-    # handle both a string and a list of strings
-    paths = [path] if isinstance(path, str) else path
-    # load all files into array
-    arrays = [np.load(_path) for _path in paths]
-    # stack arrays into single array
-    data = np.squeeze(np.stack(arrays))
+    nwb_io = NWBHDF5IO(path, mode="r")
+    nwb_file = nwb_io.read()
+    image_series = nwb_file.acquisition["image_series"]
+    data = _read_external_jpg_imageseries(image_series)
 
     # optional kwargs for the corresponding viewer.add_* method
     add_kwargs = {}
 
     layer_type = "image"  # optional, default is "image"
     return [(data, add_kwargs, layer_type)]
+
+
+def _read_external_jpg_slice(url: str):
+    buffer = requests.get(url).content
+    bytes = np.frombuffer(buffer, np.uint8)
+    slice = cv2.imdecode(bytes, cv2.IMREAD_GRAYSCALE)
+    return slice
+
+
+def _read_external_jpg_imageseries(image_series: ImageSeries):
+    assert (
+        image_series.external_file is not None
+    ), "Trying to read NWB ImageSeries' external data, but there is none."
+    image_stack = None
+    for slice_index in range(len(image_series.external_file)):
+        slice = _read_external_jpg_slice(
+            image_series.external_file[slice_index]
+        )
+        if slice_index == 0:
+            image_stack = np.array(
+                [slice]
+            )  # add extra dimension here, so vstack will work later
+        else:
+            image_stack = np.vstack((image_stack, np.array([slice])))
+    print(image_stack.shape)
+    return image_stack
